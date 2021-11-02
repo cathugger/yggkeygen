@@ -7,20 +7,18 @@
 #include <time.h>
 #include <pthread.h>
 #include <sodium/randombytes.h>
-#ifdef PASSPHRASE
-#include <sodium/crypto_hash_sha256.h>
-#endif
 #include <sodium/utils.h>
+
+#include <arpa/inet.h>
 
 #include "types.h"
 #include "likely.h"
 #include "vec.h"
 #include "base32.h"
-#include "keccak.h"
 #include "ed25519/ed25519.h"
 #include "ioutil.h"
 #include "common.h"
-#include "yaml.h"
+#include "output.h"
 
 #include "worker.h"
 
@@ -32,19 +30,10 @@
 #define FSZ "%Iu"
 #endif
 
-// additional 0 terminator is added by C
-const char * const pkprefix = "== ed25519v1-public: type0 ==\0\0";
-const char * const skprefix = "== ed25519v1-secret: type0 ==\0\0";
-
-static const char checksumstr[] = ".onion checksum";
-#define checksumstrlen (sizeof(checksumstr) - 1) // 15
-
 pthread_mutex_t keysgenerated_mutex;
 volatile size_t keysgenerated = 0;
 volatile int endwork = 0;
 
-int yamloutput = 0;
-int yamlraw = 0;
 int numwords = 1;
 size_t numneedgenerate = 0;
 
@@ -57,26 +46,51 @@ void worker_init(void)
 	ge_initeightpoint();
 }
 
-#ifdef PASSPHRASE
-// How many times we loop before a reseed
-#define DETERMINISTIC_LOOP_COUNT (1<<24)
-
-pthread_mutex_t determseed_mutex;
-u8 determseed[SEED_LEN];
-#endif
-
-
-char *makesname(void)
+static void makeyggaddress(char *dst,size_t dstlen,u8 *counter,const u8 *pk)
 {
-	char *sname = (char *) malloc(workdirlen + ONION_LEN + 63 + 1);
-	if (!sname)
+	u8 ones = 0,bits = 0,done = 0,nbits = 0;
+	u8 invpk[PUBLIC_LEN];
+	u8 addr[16] = {0};
+	// first byte is prefix, second is counter
+	u8 *aptr = &addr[2];
+	size_t alen = sizeof(addr) - 2;
+
+	memcpy(invpk,pk,PUBLIC_LEN);
+	for (size_t i; i < PUBLIC_LEN; i++)
+		invpk[i] = ~invpk[i];
+
+	for(int i = 0; i < 8 * PUBLIC_LEN; i++) {
+
+		u8 bit = (invpk[i >> 3] & (0x80 >> (i & 7))) >> (7 - (i & 7));
+
+		if (!done) {
+			if (bit != 0)
+				ones++;
+			else
+				done = 1;
+
+			continue;
+		}
+
+		bits = (bits << 1) | bit;
+		nbits++;
+		if (nbits == 8) {
+			nbits = 0;
+			*aptr++ = bits;
+			alen--;
+			if (!alen)
+				break;
+		}
+	}
+	addr[0] = 0x02; // prefix
+	addr[1] = ones; // counter
+	*counter = ones;
+
+	if (!inet_ntop(AF_INET6,addr,dst,dstlen))
 		abort();
-	if (workdir)
-		memcpy(sname,workdir,workdirlen);
-	return sname;
 }
 
-static void onionready(char *sname,const u8 *secret,const u8 *pubonion)
+static void yggready(const u8 *secret,const u8 *public)
 {
 	if (endwork)
 		return;
@@ -94,93 +108,34 @@ static void onionready(char *sname,const u8 *secret,const u8 *pubonion)
 	}
 
 	// disabled as this was never ever triggered as far as I'm aware
-#if 0
+#if 1
 	// Sanity check that the public key matches the private one.
 	ge_p3 ALIGN(16) point;
 	u8 testpk[PUBLIC_LEN];
-	ge_scalarmult_base(&point, secret);
-	ge_p3_tobytes(testpk, &point);
-	if (!memcmp(testpk, pubonion, PUBLIC_LEN))
+	ge_scalarmult_base(&point,secret);
+	ge_p3_tobytes(testpk,&point);
+	if (memcmp(testpk,public,PUBLIC_LEN) != 0) {
+		fprintf(stderr,"!!! secret key mismatch !!!\n");
 		abort();
+	}
+
 #endif
 
-	if (!yamloutput) {
-		if (createdir(sname,1) != 0) {
-			pthread_mutex_lock(&fout_mutex);
-			fprintf(stderr,"ERROR: could not create directory for key output\n");
-			pthread_mutex_unlock(&fout_mutex);
-			return;
-		}
+	char addressbuf[38+1] = {0};
+	u8 counter;
+	makeyggaddress(addressbuf,sizeof(addressbuf),&counter,public);
 
-		strcpy(&sname[onionendpos],"/hs_ed25519_secret_key");
-		writetofile(sname,secret,FORMATTED_SECRET_LEN,1);
-
-		strcpy(&sname[onionendpos],"/hs_ed25519_public_key");
-		writetofile(sname,pubonion,FORMATTED_PUBLIC_LEN,0);
-
-		strcpy(&sname[onionendpos],"/hostname");
-		FILE *hfile = fopen(sname,"w");
-		sname[onionendpos] = '\n';
-		if (hfile) {
-			fwrite(&sname[direndpos],ONION_LEN + 1,1,hfile);
-			fclose(hfile);
-		}
-		if (fout) {
-			pthread_mutex_lock(&fout_mutex);
-			fwrite(&sname[printstartpos],printlen,1,fout);
-			fflush(fout);
-			pthread_mutex_unlock(&fout_mutex);
-		}
-	}
-	else
-		yamlout_writekeys(&sname[direndpos],pubonion,secret,yamlraw);
+	output_writekey(addressbuf,public,secret,counter);
 }
 
 #include "filters_inc.inc.h"
-#include "filters_worker.inc.h"
+#include "filters_worker_i.inc.h"
 
 #ifdef STATISTICS
 #define ADDNUMSUCCESS ++st->numsuccess.v
 #else
 #define ADDNUMSUCCESS do ; while (0)
 #endif
-
-
-union pubonionunion {
-	u8 raw[PKPREFIX_SIZE + PUBLIC_LEN + 32];
-	struct {
-		u64 prefix[4];
-		u64 key[4];
-		u64 hash[4];
-	} i;
-} ;
-
-// little endian inc
-static void addsk32(u8 *sk)
-{
-	register unsigned int c = 8;
-	for (size_t i = 0;i < 32;++i) {
-		c = (unsigned int)sk[i] + c; sk[i] = c & 0xFF; c >>= 8;
-		// unsure if needed
-		if (!c) break;
-	}
-}
-
-// 0123 4567 xxxx --3--> 3456 7xxx
-// 0123 4567 xxxx --1--> 1234 567x
-static inline void shiftpk(u8 *dst,const u8 *src,size_t sbits)
-{
-	size_t i,sbytes = sbits / 8;
-	sbits %= 8;
-	for (i = 0;i + sbytes < PUBLIC_LEN;++i) {
-		dst[i] = (u8) ((src[i+sbytes] << sbits) |
-			(src[i+sbytes+1] >> (8 - sbits)));
-	}
-	for(;i < PUBLIC_LEN;++i)
-		dst[i] = 0;
-}
-
-#include "worker_slow.inc.h"
 
 
 // in little-endian order, 32 bytes aka 256 bits
@@ -198,24 +153,6 @@ static void addsztoscalar32(u8 *dst,size_t v)
 #include "worker_fast.inc.h"
 
 
-#ifdef PASSPHRASE
-static void reseedright(u8 sk[SECRET_LEN])
-{
-	crypto_hash_sha256_state state;
-	crypto_hash_sha256_init(&state);
-	// old right side
-	crypto_hash_sha256_update(&state,&sk[32],32);
-	// new random data
-	randombytes(&sk[32],32);
-	crypto_hash_sha256_update(&state,&sk[32],32);
-	// put result in right side
-	crypto_hash_sha256_final(&state,&sk[32]);
-}
-#endif // PASSPHRASE
-
-#include "worker_fast_pass.inc.h"
-
-
 #if !defined(BATCHNUM)
 	#define BATCHNUM 2048
 #endif
@@ -226,5 +163,3 @@ size_t worker_batch_memuse(void)
 }
 
 #include "worker_batch.inc.h"
-
-#include "worker_batch_pass.inc.h"

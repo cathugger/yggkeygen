@@ -1,4 +1,4 @@
-AC_INIT(mkp224o)
+AC_INIT(yggkeygen)
 # sanity check
 AC_CONFIG_SRCDIR([main.c])
 # C compiler
@@ -122,45 +122,6 @@ then
 fi
 
 
-
-AC_ARG_ENABLE([intfilter],
-	[AS_HELP_STRING([--enable-intfilter@<:@=(32|64|128|native)@:>@],
-		[use integers of specific size @<:@default=64@:>@ for filtering. faster but limits filter length to: 6 for 32-bit, 12 for 64-bit, 24 for 128-bit @<:@default=no@:>@])],
-	[], [enable_intfilter=no]
-)
-AC_ARG_ENABLE([intfilter32],
-	[AS_HELP_STRING([--enable-intfilter32], [deprecated. use --enable-intfilter=32 instead])],
-	[enable_intfilter=32]
-	[AC_MSG_WARN([--enable-intfilter32 option is deprecated. use --enable-intfilter=32 instead])],
-	[]
-)
-case "$enable_intfilter" in
-32)
-	intfiltertype="u32"
-	;;
-64|yes)
-	intfiltertype="u64"
-	;;
-128)
-	intfiltertype="unsigned __int128"
-	;;
-native)
-	intfiltertype="size_t"
-	;;
-no|"")
-	intfiltertype=""
-	;;
-*)
-	AC_MSG_WARN([unrecognised intfilter type: $enable_intfilter])
-	intfiltertype=""
-	;;
-esac
-
-if test -n "$intfiltertype"
-then
-	MYDEFS="$MYDEFS -DINTFILTER -DIFT='$intfiltertype'"
-fi
-
 AC_ARG_ENABLE([batchnum],
 	[AS_HELP_STRING([--enable-batchnum=number],
 		[number of elements to batch when using -B @<:@default=2048@:>@])],
@@ -280,16 +241,6 @@ then
 	MYDEFS="$MYDEFS -DBINSEARCH"
 fi
 
-AC_ARG_ENABLE([besort],
-	[AS_HELP_STRING([--enable-besort],
-		[force intfilter binsearch case to use big endian sorting and not omit masks from filters; useful if your filters aren't of same length @<:@default=no@:>@])],
-	[], [enable_besort=no]
-)
-if test "x$enable_besort" = "xyes"
-then
-	MYDEFS="$MYDEFS -DBESORT"
-fi
-
 AC_ARG_ENABLE([statistics],
 	[AS_HELP_STRING([--enable-statistics],
 		[collect statistics @<:@default=yes@:>@])],
@@ -299,56 +250,6 @@ if test "x$enable_statistics" = "xyes"
 then
 	MYDEFS="$MYDEFS -DSTATISTICS"
 fi
-
-AC_ARG_WITH([pcre2],[AS_HELP_STRING([--with-pcre2],[pcre2-config executable @<:@default=pcre2-config@:>@])],[],[with_pcre2="pcre2-config"])
-
-AC_ARG_ENABLE([regex],[AS_HELP_STRING([--enable-regex],[whether to enable regex engine. currently possible values are "pcre2" and "yes" which defaults to "pcre2" @<:@default=no@:>@])],[],[enable_regex=no])
-case "$enable_regex" in
-no|"")
-	;;
-yes|pcre2)
-	AC_MSG_CHECKING([pcre2])
-	V=""
-	if test "$with_pcre2" != "yes"
-	then
-		V=`"$with_pcre2" --version 2>/dev/null`
-	fi
-	if test -n "$V"
-	then
-		AC_MSG_RESULT([$V])
-		MYDEFS="$MYDEFS -DPCRE2FILTER"
-		CF=`"$with_pcre2" --cflags`
-		if test -n "$CF"
-		then
-			CFLAGS="$CFLAGS $CF"
-		fi
-		LF=`"$with_pcre2" --libs8`
-		if test -n "$LF"
-		then
-			MAINLIB="$MAINLIB $LF"
-		fi
-	else
-		AC_MSG_RESULT([not found])
-		AC_MSG_ERROR(pcre2-config cannot be executed)
-	fi
-	;;
-*)
-	AC_MSG_WARN([unrecognised regex engine type: $enable_regex])
-	;;
-esac
-
-
-AC_MSG_CHECKING([whether ARGON2ID13 is supported by libsodium])
-AC_COMPILE_IFELSE(
-	[AC_LANG_PROGRAM(
-		[[#include <sodium/crypto_pwhash.h>]],
-		[[int alg = crypto_pwhash_ALG_ARGON2ID13;(void) alg;]]
-	)],
-	[AC_MSG_RESULT([yes])]
-	[MYDEFS="$MYDEFS -DPASSPHRASE"],
-	[AC_MSG_RESULT([no])]
-)
-
 
 # recreate dir tree, because otherwise gcc will fuck up
 (cd "$srcdir" && find ed25519 -type d) | xargs mkdir -p

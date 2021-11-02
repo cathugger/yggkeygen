@@ -1,12 +1,10 @@
 # output files
-mkp224o
+yggkeygen
 *.o
-
-# generated onions
-*.onion
 
 # garbage
 configure
+configure~
 GNUmakefile
 GNUmakefile.in.bak
 config.status
