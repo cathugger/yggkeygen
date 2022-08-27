@@ -52,6 +52,7 @@ do { \
 #define BUF_APPEND_CSTR(buf,offset,src) BUF_APPEND(buf,offset,src,strlen(src))
 #define BUF_APPEND_CHAR(buf,offset,c) buf[offset++] = (c)
 
+static u8 bestCompressKnown = 0;
 
 void output_writekey(
 	const char *address,const u8 *publickey,const u8 *secretkey,u8 compress)
@@ -61,7 +62,6 @@ void output_writekey(
 	char seckeybuf[B16_SECKEY_LEN + NULLTERM_LEN];
 	char compressbuf[COMPRESS_LEN + NULLTERM_LEN];
 	size_t offset = 0;
-
 
 	BUF_APPEND(keysbuf,offset,keys_field_address,KEYS_FIELD_ADDRESS_LEN);
 	BUF_APPEND(keysbuf,offset,address,ADDRESS_LEN);
@@ -98,6 +98,11 @@ void output_writekey(
 
 	pthread_mutex_lock(&fout_mutex);
 
+	if (bestCompressKnown >= compress) {
+		goto end;
+	}
+	bestCompressKnown = compress;
+
 	fwrite(keysbuf,offset,1,fout);
 	fflush(fout);
 
@@ -106,6 +111,7 @@ void output_writekey(
 		fflush(stdout);
 	}
 
+end:
 	pthread_mutex_unlock(&fout_mutex);
 }
 
